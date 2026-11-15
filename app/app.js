@@ -28,7 +28,8 @@ function row(i) {
   );
   const cell = el('span', { class: 'take' });
   const btn = el('button', { type: 'button', 'data-testid': 'ack' }, 'Ack');
-  btn.addEventListener('click', async () => {
+  // Product's decision (step one): Ack asks to confirm first, and the confirm names the incident the click hit.
+  btn.addEventListener('click', () => askToAck(i.id, async () => {
     btn.disabled = true;
     try {
       const r = await ack(i.id); // R2
@@ -38,11 +39,27 @@ function row(i) {
       btn.disabled = false;
       show(`ack ${i.id} failed: ${e.message}`);
     }
-  });
+  }));
   cell.append(btn);
   li.append(cell);
   return li;
 }
+
+// The confirm: one at a time, named by incident id, fixed on screen so the moving list can't shift it.
+const confirmBox = document.querySelector('[data-testid="confirm"]');
+const confirmText = confirmBox.querySelector('.confirm-text');
+let pending = null;
+function askToAck(id, run) {
+  pending = run;
+  confirmText.textContent = `Ack ${id}?`;
+  confirmBox.dataset.id = id;
+  confirmBox.hidden = false;
+  confirmBox.querySelector('[data-testid="confirm-ack"]').focus();
+}
+function closeConfirm() { confirmBox.hidden = true; pending = null; delete confirmBox.dataset.id; }
+confirmBox.querySelector('[data-testid="confirm-ack"]').addEventListener('click', () => { const run = pending; closeConfirm(); run?.(); });
+confirmBox.querySelector('[data-testid="confirm-cancel"]').addEventListener('click', closeConfirm);
+addEventListener('keydown', (e) => { if (e.key === 'Escape' && !confirmBox.hidden) closeConfirm(); });
 
 // R1: new incidents go on top, newest first. The page is newest first, so insert from its oldest up.
 function add(incidents) {

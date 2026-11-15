@@ -10,7 +10,7 @@ const { chromium } = await import(process.env.PLAYWRIGHT || 'playwright');
 const launch = process.env.CHROMIUM ? { executablePath: process.env.CHROMIUM, args: ['--no-sandbox'] } : {};
 
 // Fake API: two incidents on the first read, one more per `since` read after the third; ack answers a receipt.
-let reads = 0; const acked = [];
+let reads = 0; const acked = []; let none = false;
 const base = [
   { id: 'INC-2', service: 'auth', region: 'eu-west', summary: 'login <b>loop</b>', severity: 'sev1', openedAt: '2026-11-12T03:03:00.000Z' },
   { id: 'INC-1', service: 'exports', region: 'us-east', summary: 'export stuck', severity: 'sev3', openedAt: '2026-11-12T02:00:00.000Z' },
@@ -20,7 +20,7 @@ const server = http.createServer((req, res) => {
   const u = new URL(req.url, 'http://x');
   if (u.pathname === '/api/incidents') {
     reads++;
-    const incidents = !u.searchParams.get('since') ? base
+    const incidents = none ? [] : !u.searchParams.get('since') ? base
       : reads > 3 ? [{ id: `INC-${reads}`, service: 'payments', region: 'ap-south', summary: 'new one', severity: 'sev2', openedAt: new Date().toISOString() }] : [];
     const delay = reads === 1 ? 600 : 0; // first answer slow, so the loader can be seen
     return setTimeout(() => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ updatedAt: new Date().toISOString(), incidents, cursor: `c${reads}` })); }, delay);
@@ -73,12 +73,30 @@ try {
     const ids = await page.locator(t('incident-row')).evaluateAll((rs) => rs.map((r) => r.dataset.id));
     assert.match(ids[0], /^INC-\d+$/); assert.notEqual(ids[0], 'INC-2');
   });
-  await check('R2 Ack acks that incident with the latest cursor and marks the row', async () => {
+  await check('R2 + product: Ack opens a confirm naming the incident; Cancel sends nothing', async () => {
+    const r = page.locator(`${t('incident-row')}[data-id="INC-2"]`);
+    const sent = acked.length;
+    await r.locator(t('ack')).click();
+    assert.equal(await page.locator(t('confirm')).isVisible(), true);
+    assert.match(await page.locator(t('confirm')).innerText(), /INC-2\b/);
+    await page.locator(t('confirm-cancel')).click();
+    assert.equal(await page.locator(t('confirm')).isVisible(), false);
+    await page.waitForTimeout(300);
+    assert.equal(acked.length, sent); assert.equal(await r.locator(t('ack')).count(), 1);
+  });
+  await check('R2 + product: confirm-ack acks that incident with the latest cursor and marks the row', async () => {
     const r = page.locator(`${t('incident-row')}[data-id="INC-1"]`);
     await r.locator(t('ack')).click();
+    assert.match(await page.locator(t('confirm')).innerText(), /INC-1\b/);
+    await page.locator(t('confirm-ack')).click();
     await r.locator(t('acked')).waitFor();
     assert.equal(acked.at(-1).id, 'INC-1'); assert.match(acked.at(-1).cursor, /^c\d+$/);
     assert.equal(await r.locator(t('ack')).count(), 0);
+  });
+  await check('product: Escape closes the confirm', async () => {
+    await page.locator(`${t('incident-row')}[data-id="INC-2"] ${t('ack')}`).click();
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator(t('confirm')).isVisible(), false);
   });
   await check('R5 Auckland en-NZ: its own zone, day first', async () => {
     const p2 = await (await browser.newContext({ locale: 'en-NZ', timezoneId: 'Pacific/Auckland' })).newPage();
@@ -86,6 +104,14 @@ try {
     const time = p2.locator(`${t('incident-row')}[data-id="INC-2"] time`);
     await time.waitFor();
     assert.match(await time.textContent(), /^12\/11\/2026,? 04:03:00\spm$/i);
+  });
+  await check('empty state when there are no incidents, loader gone', async () => {
+    none = true;
+    const p4 = await (await browser.newContext()).newPage();
+    await p4.goto(origin);
+    await p4.locator(t('empty')).waitFor({ state: 'visible', timeout: 5000 });
+    assert.equal(await p4.locator(t('loader')).count(), 0);
+    none = false;
   });
   await check('R5 New York en-US: month first', async () => {
     const p3 = await (await browser.newContext({ locale: 'en-US', timezoneId: 'America/New_York' })).newPage();
