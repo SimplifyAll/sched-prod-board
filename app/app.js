@@ -1,19 +1,72 @@
-import { fetchIncidents } from './api.js';
+import { fetchIncidents, ack } from './api.js';
 
+const REFRESH_MS = 2000; // R4
 const list = document.querySelector('[data-testid="incident-list"]');
+const empty = document.querySelector('[data-testid="empty"]');
+const status = document.querySelector('.status');
+const rows = new Map(); // incident id -> <li>, so a refresh adds rows and never rebuilds the ones on screen
 
-function render(incidents) {
-  list.innerHTML = incidents
-    .map(
-      (i) => `<li data-testid="incident-row" data-id="${i.id}" class="row ${i.severity}">
-        <span class="id">${i.id}</span>
-        <span class="sev">${i.severity}</span>
-        <span class="what">${i.service} · ${i.region} · ${i.summary}</span>
-        <time datetime="${i.openedAt}">${i.openedAt}</time>
-      </li>`,
-    )
-    .join('');
+// R5: the viewer's own time zone and date order (de-DE and en-GB give dd/mm, en-US gives mm/dd).
+const fmt = new Intl.DateTimeFormat(undefined, {
+  day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit',
+});
+
+function el(tag, attrs = {}, text) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  if (text !== undefined) e.textContent = text;
+  return e;
 }
 
-const page = await fetchIncidents();
-render(page.incidents);
+function row(i) {
+  const li = el('li', { 'data-testid': 'incident-row', 'data-id': i.id, class: `row ${i.severity}` });
+  li.append(
+    el('span', { class: 'id' }, i.id),
+    el('span', { class: 'sev' }, i.severity),
+    el('span', { class: 'what' }, `${i.service} · ${i.region} · ${i.summary}`),
+    el('time', { datetime: i.openedAt, title: i.openedAt }, fmt.format(new Date(i.openedAt))),
+  );
+  const cell = el('span', { class: 'take' });
+  const btn = el('button', { type: 'button', 'data-testid': 'ack' }, 'Ack');
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    try {
+      const r = await ack(i.id); // R2
+      btn.replaceWith(el('span', { 'data-testid': 'acked', class: 'acked', title: r.ackedAt }, `acked ${fmt.format(new Date(r.ackedAt))}`));
+      li.classList.add('is-acked');
+    } catch (e) {
+      btn.disabled = false;
+      show(`ack ${i.id} failed: ${e.message}`);
+    }
+  });
+  cell.append(btn);
+  li.append(cell);
+  return li;
+}
+
+// R1: new incidents go on top, newest first. The page is newest first, so insert from its oldest up.
+function add(incidents) {
+  for (const i of [...incidents].reverse()) {
+    if (rows.has(i.id)) continue;
+    const li = row(i);
+    rows.set(i.id, li);
+    list.prepend(li);
+  }
+  empty.hidden = rows.size > 0;
+}
+
+function show(msg) { status.textContent = msg; status.hidden = !msg; }
+
+async function tick() {
+  try {
+    const page = await fetchIncidents();
+    add(page.incidents);
+    document.querySelector('[data-testid="loader"]')?.remove(); // R3: gone once incidents load
+    show('');
+  } catch (e) {
+    show(`could not load incidents: ${e.message}`);
+  }
+  setTimeout(tick, REFRESH_MS); // R4: one request at a time, 2 s after the last answer
+}
+
+tick();
